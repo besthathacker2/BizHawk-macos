@@ -1,130 +1,95 @@
-name: Build BizHawk macOS ARM64
+name: BizHawk macOS ARM64
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - MacUnixMonoCompat
-  pull_request:
-    branches:
-      - MacUnixMonoCompat
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-macos-arm64:
-    name: macOS ARM64
+  build:
+    name: Build BizHawk macOS ARM64
     runs-on: macos-14
 
     env:
-      CONFIGURATION: Release
+      XAMARIN_MAC_VERSION: "9.3.0.23"
+      XAMARIN_MAC_PKG: "xamarin.mac-9.3.0.23.pkg"
+      XAMARIN_MAC_URL: "https://download.visualstudio.microsoft.com/download/pr/ceb0ea3f-4db8-46b4-8dc3-8049d27c0107/7b04843d469aae253519989fcb8e750f/xamarin.mac-9.3.0.23.pkg"
 
     steps:
-      # ------------------------------------------------------------
-      # Checkout
-      # ------------------------------------------------------------
-      - name: Checkout repository
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 1
 
-      # ------------------------------------------------------------
-      # Runner diagnostics
-      # ------------------------------------------------------------
+      # ============================================================
+      # MACHINE INFORMATION
+      # ============================================================
+
       - name: Show runner information
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           echo "RUNNER_ARCH=$RUNNER_ARCH"
           echo "RUNNER_OS=$RUNNER_OS"
 
+          echo
           echo "uname:"
           uname -a
-
-          echo "architecture:"
           uname -m
 
+          echo
           echo "macOS:"
           sw_vers
 
+          echo
           echo "Xcode:"
           xcodebuild -version
 
-      # ------------------------------------------------------------
-      # Mono / MSBuild diagnostics
-      # ------------------------------------------------------------
-      - name: Check Mono and MSBuild
+      # ============================================================
+      # ROSETTA
+      # ============================================================
+
+      - name: Install Rosetta 2
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          echo "Mono:"
-          command -v mono || true
-          mono --version || true
+          if [ "$(uname -m)" = "arm64" ]; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
 
-          echo
-          echo "MSBuild:"
-          command -v msbuild || true
-          msbuild -version || true
+          echo "Native:"
+          arch -arm64 uname -m
 
-          echo
-          echo "xbuild:"
-          command -v xbuild || true
-          xbuild /version || true
+          echo "Rosetta:"
+          arch -x86_64 uname -m
 
-      # ------------------------------------------------------------
-      # Locate Xamarin.Mac
-      # ------------------------------------------------------------
-      - name: Locate Xamarin.Mac
+      # ============================================================
+      # MONO
+      # ============================================================
+
+      - name: Install Mono
         shell: bash
         run: |
-          set -eux
-
-          echo "Searching for Xamarin.Mac.CSharp.targets..."
-
-          find /Library/Frameworks \
-            -name "Xamarin.Mac.CSharp.targets" \
-            -print 2>/dev/null || true
-
-          echo
-          echo "Searching for Xamarin.Mac..."
-
-          find /Library/Frameworks \
-            -iname "*Xamarin.Mac*" \
-            -print 2>/dev/null || true
-
-          echo
-          echo "Mono Xamarin directory..."
-
-          find /Library/Frameworks/Mono.framework \
-            -maxdepth 6 \
-            -iname "*Xamarin*" \
-            -print 2>/dev/null || true
-
-      # ------------------------------------------------------------
-      # Install basic dependencies
-      # ------------------------------------------------------------
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -eux
+          set -euxo pipefail
 
           brew update
-
-          # Mono is normally already present on the GitHub image,
-          # but make sure Homebrew dependencies are available.
           brew install mono || true
 
-      # ------------------------------------------------------------
-      # Put Mono first in PATH
-      # ------------------------------------------------------------
       - name: Configure Mono PATH
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           if [ -d "/Library/Frameworks/Mono.framework/Versions/Current/bin" ]; then
             echo "/Library/Frameworks/Mono.framework/Versions/Current/bin" >> "$GITHUB_PATH"
@@ -134,99 +99,260 @@ jobs:
             echo "/Library/Frameworks/Mono.framework/Commands" >> "$GITHUB_PATH"
           fi
 
-      # ------------------------------------------------------------
-      # Verify dependencies after PATH setup
-      # ------------------------------------------------------------
-      - name: Verify build environment
+      # ============================================================
+      # VERIFY MONO
+      # ============================================================
+
+      - name: Verify Mono and MSBuild
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          echo "PATH=$PATH"
-
-          command -v mono
+          echo "Mono:"
+          which mono
           mono --version
 
-          command -v msbuild
+          echo
+          echo "MSBuild:"
+          which msbuild
           msbuild -version
 
-      # ------------------------------------------------------------
-      # Restore submodules explicitly
-      # ------------------------------------------------------------
+      # ============================================================
+      # DOWNLOAD XAMARIN.MAC
+      # ============================================================
+
+      - name: Download Xamarin.Mac 9.3.0.23
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$RUNNER_TEMP/xamarin"
+
+          curl \
+            --fail \
+            --location \
+            --retry 5 \
+            --retry-delay 3 \
+            --connect-timeout 30 \
+            "$XAMARIN_MAC_URL" \
+            --output "$RUNNER_TEMP/xamarin/$XAMARIN_MAC_PKG"
+
+          ls -lh "$RUNNER_TEMP/xamarin/$XAMARIN_MAC_PKG"
+
+          file "$RUNNER_TEMP/xamarin/$XAMARIN_MAC_PKG"
+
+      # ============================================================
+      # VERIFY PACKAGE
+      # ============================================================
+
+      - name: Verify Xamarin.Mac package
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PKG="$RUNNER_TEMP/xamarin/$XAMARIN_MAC_PKG"
+
+          echo "Package:"
+          pkgutil --pkg-info-plist "$PKG" || true
+
+          echo
+          echo "Signature:"
+          pkgutil --check-signature "$PKG"
+
+      # ============================================================
+      # INSTALL XAMARIN.MAC
+      #
+      # This is the important part.
+      #
+      # Do NOT copy individual targets manually.
+      # ============================================================
+
+      - name: Install Xamarin.Mac 9.3.0.23
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PKG="$RUNNER_TEMP/xamarin/$XAMARIN_MAC_PKG"
+
+          sudo installer \
+            -pkg "$PKG" \
+            -target /
+
+      # ============================================================
+      # FIND XAMARIN.MAC
+      # ============================================================
+
+      - name: Verify Xamarin.Mac installation
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Xamarin.Mac targets:"
+          find /Library/Frameworks/Mono.framework \
+            -name "Xamarin.Mac.CSharp.targets" \
+            -print 2>/dev/null || true
+
+          echo
+          echo "Xamarin.Mac assemblies:"
+          find /Library/Frameworks/Mono.framework \
+            -name "Xamarin.Mac.dll" \
+            -print 2>/dev/null || true
+
+          echo
+          echo "Xamarin.Mac directories:"
+          find /Library/Frameworks/Mono.framework \
+            -type d \
+            -path "*Xamarin/Mac*" \
+            -print 2>/dev/null || true
+
+      # ============================================================
+      # CHECK EXACT FILE FROM YOUR ERROR
+      # ============================================================
+
+      - name: Verify MSBuild Xamarin.Mac target
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TARGET="/Library/Frameworks/Mono.framework/Versions/6.12.0/lib/mono/xbuild/Xamarin/Mac/Xamarin.Mac.CSharp.targets"
+
+          if [ ! -f "$TARGET" ]; then
+            echo
+            echo "ERROR:"
+            echo "$TARGET"
+            echo "does not exist."
+            echo
+            echo "Searching for the actual target:"
+            find /Library/Frameworks/Mono.framework \
+              -name "Xamarin.Mac.CSharp.targets" \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          ls -l "$TARGET"
+
+      # ============================================================
+      # SHOW XAMARIN.MAC VERSION
+      # ============================================================
+
+      - name: Show Xamarin.Mac version
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          find /Library/Frameworks/Mono.framework \
+            -name "Xamarin.Mac.dll" \
+            -print \
+            -exec sh -c '
+              echo "Assembly: $1"
+              /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$1" 2>/dev/null || true
+            ' _ {} \;
+
+      # ============================================================
+      # SUBMODULES
+      # ============================================================
+
       - name: Initialize submodules
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           git submodule sync --recursive
           git submodule update --init --recursive
 
-      # ------------------------------------------------------------
-      # Build normal BizHawk output
-      #
-      # The repository's own Mono build script invokes MSBuild.
-      # ------------------------------------------------------------
+      # ============================================================
+      # BUILD NORMAL BIZHAWK
+      # ============================================================
+
       - name: Build BizHawk Mono Release
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           chmod +x Dist/*.sh
 
           ./Dist/MonoBuildRelease.sh
 
-      # ------------------------------------------------------------
-      # Verify normal output exists
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY NORMAL OUTPUT
+      # ============================================================
+
       - name: Verify BizHawk output
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           test -d output
 
-          echo "Output contents:"
-          find output -maxdepth 2 -type f | head -200
+          echo "BizHawk output:"
+          find output -maxdepth 2 -type f | head -300
 
-      # ------------------------------------------------------------
-      # Patch Mac project for ARM64
+      # ============================================================
+      # PATCH MAC PROJECT
       #
-      # The original project hard-codes:
+      # Original project contains:
       #
       #   <PlatformTarget>x64</PlatformTarget>
       #
-      # We change it only inside the CI workspace.
-      # ------------------------------------------------------------
+      # Change it to ARM64 for CI.
+      # ============================================================
+
       - name: Configure Mac project for ARM64
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           PROJECT="BizHawk.Client.EmuHawkMacApp/BizHawk.Client.EmuHawkMacApp.csproj"
 
-          echo "Original PlatformTarget values:"
+          cp "$PROJECT" "$PROJECT.original"
+
+          echo "Original PlatformTarget:"
           grep -n "PlatformTarget" "$PROJECT" || true
 
-          # Replace the hard-coded x64 target with ARM64.
-          sed -i '' 's/<PlatformTarget>x64<\/PlatformTarget>/<PlatformTarget>ARM64<\/PlatformTarget>/g' "$PROJECT"
+          sed -i '' \
+            's/<PlatformTarget>x64<\/PlatformTarget>/<PlatformTarget>ARM64<\/PlatformTarget>/g' \
+            "$PROJECT"
 
           echo
-          echo "Updated PlatformTarget values:"
-          grep -n "PlatformTarget" "$PROJECT"
+          echo "New PlatformTarget:"
+          grep -n "PlatformTarget" "$PROJECT" || true
 
-          # Make absolutely sure there are no x64 targets left.
           if grep -q '<PlatformTarget>x64</PlatformTarget>' "$PROJECT"; then
-            echo "ERROR: x64 PlatformTarget remains in project."
+            echo "ERROR: x64 PlatformTarget remains."
             exit 1
           fi
 
-      # ------------------------------------------------------------
-      # Build the macOS application
-      # ------------------------------------------------------------
+      # ============================================================
+      # SHOW MAC PROJECT
+      # ============================================================
+
+      - name: Verify Mac project
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PROJECT="BizHawk.Client.EmuHawkMacApp/BizHawk.Client.EmuHawkMacApp.csproj"
+
+          echo "Xamarin imports:"
+          grep -n "Xamarin.Mac" "$PROJECT" || true
+
+          echo
+          echo "Target framework:"
+          grep -n "TargetFramework\|TargetFrameworkVersion" "$PROJECT" || true
+
+          echo
+          echo "Platform:"
+          grep -n "PlatformTarget" "$PROJECT" || true
+
+      # ============================================================
+      # BUILD MAC APP
+      # ============================================================
+
       - name: Build macOS ARM64 application
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           PROJECT="BizHawk.Client.EmuHawkMacApp/BizHawk.Client.EmuHawkMacApp.csproj"
 
@@ -238,30 +364,32 @@ jobs:
             /p:CreatePackage=true \
             /p:IncludeMonoRuntime=true \
             /p:DebugSymbols=false \
+            /p:DebugType=None \
             /verbosity:minimal
 
-      # ------------------------------------------------------------
-      # Find generated .app
-      # ------------------------------------------------------------
-      - name: Locate application
+      # ============================================================
+      # LOCATE APP
+      # ============================================================
+
+      - name: Locate .app
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
-          echo "Searching for .app bundles..."
-
-          find . \
+          echo "Applications:"
+          find BizHawk.Client.EmuHawkMacApp \
             -type d \
             -name "*.app" \
             -print
 
-      # ------------------------------------------------------------
-      # Find executable inside app
-      # ------------------------------------------------------------
-      - name: Inspect application architecture
+      # ============================================================
+      # VERIFY APP EXISTS
+      # ============================================================
+
+      - name: Verify application bundle
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           APP=$(find BizHawk.Client.EmuHawkMacApp \
             -type d \
@@ -269,31 +397,50 @@ jobs:
             -print -quit)
 
           if [ -z "$APP" ]; then
-            echo "ERROR: No .app was generated."
+            echo "ERROR: no .app was generated."
             exit 1
           fi
 
           echo "APP=$APP"
 
-          echo
-          echo "Bundle contents:"
-          find "$APP" -maxdepth 3 -type f | head -200
+          test -d "$APP/Contents"
+          test -f "$APP/Contents/Info.plist"
 
           echo
-          echo "Executables:"
+          echo "Bundle contents:"
+          find "$APP/Contents" \
+            -maxdepth 3 \
+            -type f | head -300
+
+      # ============================================================
+      # FIND MAIN EXECUTABLE
+      # ============================================================
+
+      - name: Find native executable
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          APP=$(find BizHawk.Client.EmuHawkMacApp \
+            -type d \
+            -name "*.app" \
+            -print -quit)
+
+          echo "MacOS directory:"
           find "$APP/Contents/MacOS" \
-            -type f \
             -maxdepth 1 \
+            -type f \
             -print \
             -exec file {} \;
 
-      # ------------------------------------------------------------
-      # Verify executable is ARM64
-      # ------------------------------------------------------------
+      # ============================================================
+      # VERIFY ARM64
+      # ============================================================
+
       - name: Verify ARM64 executable
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           APP=$(find BizHawk.Client.EmuHawkMacApp \
             -type d \
@@ -303,12 +450,15 @@ jobs:
           EXEC="$APP/Contents/MacOS/BizHawk"
 
           if [ ! -f "$EXEC" ]; then
-            echo "ERROR: Expected executable not found:"
+            echo "ERROR: BizHawk executable not found:"
             echo "$EXEC"
 
             echo
-            echo "Available executables:"
-            find "$APP/Contents/MacOS" -type f -print
+            echo "Available files:"
+            find "$APP/Contents/MacOS" \
+              -maxdepth 1 \
+              -type f \
+              -print
 
             exit 1
           fi
@@ -320,59 +470,81 @@ jobs:
           echo "lipo:"
           lipo -info "$EXEC"
 
-          # Require arm64.
-          if ! file "$EXEC" | grep -q "arm64"; then
+          echo
+          echo "Architecture:"
+          ARCH_INFO="$(file "$EXEC")"
+          echo "$ARCH_INFO"
+
+          if ! echo "$ARCH_INFO" | grep -q "arm64"; then
             echo
-            echo "ERROR: BizHawk executable is not ARM64."
+            echo "ERROR: executable is not ARM64."
             exit 1
           fi
 
-      # ------------------------------------------------------------
-      # Check bundled native libraries
-      # ------------------------------------------------------------
-      - name: Inspect native libraries
+      # ============================================================
+      # CHECK ALL NATIVE MACH-O FILES
+      # ============================================================
+
+      - name: Check native binaries
         shell: bash
         run: |
-          set -eux
+          set -uo pipefail
 
           APP=$(find BizHawk.Client.EmuHawkMacApp \
             -type d \
             -name "*.app" \
             -print -quit)
 
-          echo "Native Mach-O files in application:"
+          FAILED=0
 
-          find "$APP" -type f -print0 |
-            while IFS= read -r -d '' file; do
-              if file "$file" | grep -q "Mach-O"; then
-                echo
-                echo "$file"
-                file "$file"
+          while IFS= read -r -d '' FILE; do
+            INFO="$(file "$FILE")"
+
+            if echo "$INFO" | grep -q "Mach-O"; then
+              echo
+              echo "$FILE"
+              echo "$INFO"
+
+              if ! echo "$INFO" | grep -q "arm64"; then
+                echo "WARNING: non-ARM64 native binary"
+                FAILED=1
               fi
-            done
+            fi
+          done < <(find "$APP" -type f -print0)
 
-      # ------------------------------------------------------------
-      # Verify Info.plist
-      # ------------------------------------------------------------
-      - name: Inspect Info.plist
+          if [ "$FAILED" -ne 0 ]; then
+            echo
+            echo "ERROR: one or more Mach-O files are not ARM64."
+            exit 1
+          fi
+
+      # ============================================================
+      # INFO.PLIST
+      # ============================================================
+
+      - name: Validate Info.plist
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           APP=$(find BizHawk.Client.EmuHawkMacApp \
             -type d \
             -name "*.app" \
             -print -quit)
 
+          plutil -lint "$APP/Contents/Info.plist"
+
+          echo
           plutil -p "$APP/Contents/Info.plist"
 
-      # ------------------------------------------------------------
-      # Create ZIP
-      # ------------------------------------------------------------
-      - name: Package ARM64 application
+      # ============================================================
+      # PACKAGE
+      # ============================================================
+
+      - name: Package ARM64 app
         shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
 
           mkdir -p artifact
 
@@ -380,11 +552,6 @@ jobs:
             -type d \
             -name "*.app" \
             -print -quit)
-
-          if [ -z "$APP" ]; then
-            echo "ERROR: No application bundle found."
-            exit 1
-          fi
 
           ditto \
             -c \
@@ -394,12 +561,15 @@ jobs:
             "$APP" \
             "artifact/BizHawk-macOS-ARM64.zip"
 
+          echo
+          echo "Artifact:"
           ls -lh artifact/
 
-      # ------------------------------------------------------------
-      # Upload ZIP
-      # ------------------------------------------------------------
-      - name: Upload ARM64 artifact
+      # ============================================================
+      # UPLOAD ZIP
+      # ============================================================
+
+      - name: Upload ARM64 ZIP
         uses: actions/upload-artifact@v4
         with:
           name: BizHawk-macOS-ARM64
@@ -407,14 +577,14 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # ------------------------------------------------------------
-      # Upload raw .app too
-      # ------------------------------------------------------------
-      - name: Upload raw application
+      # ============================================================
+      # UPLOAD RAW APP
+      # ============================================================
+
+      - name: Upload raw ARM64 app
         uses: actions/upload-artifact@v4
         with:
           name: BizHawk-macOS-ARM64-app
-          path: |
-            BizHawk.Client.EmuHawkMacApp/bin/Release/*.app
+          path: BizHawk.Client.EmuHawkMacApp/bin/Release/*.app
           if-no-files-found: warn
           retention-days: 14
