@@ -69,6 +69,17 @@
       </CustomCommands>
     </CustomCommands>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|ARM64'">
+   <DebugType>none</DebugType>
+   <Optimize>true</Optimize>
+   <OutputPath>bin\Release\</OutputPath>
+   <DefineConstants>TRACE</DefineConstants>
+   <ErrorReport>prompt</ErrorReport>
+   <WarningLevel>4</WarningLevel>
+   <PlatformTarget>ARM64</PlatformTarget>
+   <CreatePackage>true</CreatePackage>
+   <IncludeMonoRuntime>true</IncludeMonoRuntime>
+</PropertyGroup>
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Core" />
